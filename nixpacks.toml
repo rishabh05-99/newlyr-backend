@@ -1,8 +1,5 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "python311"]
-
-[variables]
-NIXPACKS_PYTHON_VERSION = "3.11"
+nixPkgs = ["ffmpeg", "python311", "python311Packages.pip"]
 
 [start]
 cmd = "gunicorn main:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
