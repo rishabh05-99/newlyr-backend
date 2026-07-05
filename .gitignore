@@ -1,0 +1,39 @@
+# Environment variables — NEVER commit these
+.env
+.env.local
+.env.production
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+pip-debug.log
+
+# Secrets
+secrets.json
+config.json
+*secret*
+*password*
+*credential*
+
+# Temp audio files
+*.mp3
+*.wav
+*.webm
+*.aac
+*.m4a
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
