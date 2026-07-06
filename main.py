@@ -226,16 +226,16 @@ def lyrics():
         return jsonify({"error": "Invalid audio source"}), 400
 
     try:
-        config     = aai.TranscriptionConfig(
+        config = aai.TranscriptionConfig(
             speech_model=aai.SpeechModel.best,
-            language_detection=True
+            language_code="en"
         )
         transcriber = aai.Transcriber(config=config)
         transcript  = transcriber.transcribe(vocals_url)
 
         if transcript.status == aai.TranscriptStatus.error:
-            logger.error("AssemblyAI transcription error")
-            return jsonify({"error": "Lyrics transcription failed"}), 500
+            logger.error(f"AssemblyAI error: {transcript.error}")
+            return jsonify({"error": "Lyrics transcription failed", "detail": transcript.error}), 500
 
         words = [{"text": w.text, "start": w.start, "end": w.end} for w in transcript.words]
         logger.info(f"Lyrics fetched: {len(words)} words")
