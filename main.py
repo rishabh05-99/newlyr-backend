@@ -219,27 +219,46 @@ def lyrics():
 
     vocals_url = data.get("vocals_url", "").strip()
 
-    # Validate URL — must be from Lalal.ai only
+    # Validate URL — must be from Lalal.ai only (includes d.lalal.ai CDN subdomain)
     if not vocals_url:
         return jsonify({"error": "No vocals URL provided"}), 400
-    if not (vocals_url.startswith("https://") and "lalal.ai" in vocals_url):
+    if not (vocals_url.startswith("https://") and ("lalal.ai" in vocals_url)):
         return jsonify({"error": "Invalid audio source"}), 400
 
     try:
-        config = aai.TranscriptionConfig(
-            speech_model=aai.SpeechModel.best,
-            language_code="en"
-        )
-        transcriber = aai.Transcriber(config=config)
-        transcript  = transcriber.transcribe(vocals_url)
+        # Download vocals from Lalal.ai first — their CDN URLs may not be
+        # publicly accessible directly by AssemblyAI
+        logger.info(f"Downloading vocals from: {vocals_url[:80]}")
+        vocals_response = requests.get(vocals_url, timeout=60)
+        if vocals_response.status_code != 200:
+            logger.error(f"Failed to download vocals: {vocals_response.status_code}")
+            return jsonify({"error": "Could not download vocals for transcription"}), 500
 
-        if transcript.status == aai.TranscriptStatus.error:
-            logger.error(f"AssemblyAI error: {transcript.error}")
-            return jsonify({"error": "Lyrics transcription failed", "detail": transcript.error}), 500
+        # Save to temp file
+        tmp_vocals_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}_vocals_for_lyrics.mp3")
+        with open(tmp_vocals_path, "wb") as f:
+            f.write(vocals_response.content)
+        logger.info(f"Vocals downloaded: {len(vocals_response.content)} bytes")
 
-        words = [{"text": w.text, "start": w.start, "end": w.end} for w in transcript.words]
-        logger.info(f"Lyrics fetched: {len(words)} words")
-        return jsonify({"full_text": transcript.text, "words": words})
+        try:
+            config = aai.TranscriptionConfig(
+                speech_model=aai.SpeechModel.best,
+            )
+            transcriber = aai.Transcriber(config=config)
+            logger.info("Uploading vocals to AssemblyAI...")
+            transcript = transcriber.transcribe(tmp_vocals_path)
+            logger.info(f"AssemblyAI status: {transcript.status}")
+
+            if transcript.status == aai.TranscriptStatus.error:
+                logger.error(f"AssemblyAI error: {transcript.error}")
+                return jsonify({"error": "Lyrics transcription failed", "detail": str(transcript.error)}), 500
+
+            words = [{"text": w.text, "start": w.start, "end": w.end} for w in transcript.words]
+            logger.info(f"Lyrics fetched: {len(words)} words")
+            return jsonify({"full_text": transcript.text, "words": words})
+        finally:
+            if os.path.exists(tmp_vocals_path):
+                os.remove(tmp_vocals_path)
 
     except Exception as e:
         logger.error(f"Lyrics error: {type(e).__name__}")
