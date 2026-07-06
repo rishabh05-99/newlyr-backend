@@ -115,11 +115,15 @@ def upload():
             )
 
         if upload_response.status_code != 200:
-            logger.error("Lalal.ai upload failed")  # don't log the key or response body
-            return jsonify({"error": "Stem separation service unavailable"}), 500
+            logger.error(f"Lalal.ai upload failed: status={upload_response.status_code} body={upload_response.text[:200]}")
+            return jsonify({"error": "Stem separation service unavailable", "detail": upload_response.text[:200]}), 500
 
         upload_data = upload_response.json()
+        logger.info(f"Lalal.ai upload response keys: {list(upload_data.keys())}")
         file_id = upload_data.get("id")
+        if not file_id:
+            logger.error(f"No file_id in response: {upload_data}")
+            return jsonify({"error": "No file ID from Lalal.ai", "detail": str(upload_data)[:200]}), 500
 
         process_response = requests.post(
             "https://www.lalal.ai/api/process/",
@@ -128,11 +132,13 @@ def upload():
             timeout=30
         )
 
+        logger.info(f"Lalal.ai process status: {process_response.status_code} body: {process_response.text[:200]}")
+
         if process_response.status_code != 200:
-            return jsonify({"error": "Stem processing failed"}), 500
+            return jsonify({"error": "Stem processing failed", "detail": process_response.text[:200]}), 500
 
         # Poll for completion
-        for _ in range(60):
+        for attempt in range(60):
             check_response = requests.post(
                 "https://www.lalal.ai/api/check/",
                 headers={"Authorization": f"license {LALAL_API_KEY}"},
@@ -140,20 +146,22 @@ def upload():
                 timeout=15
             )
             check_data = check_response.json()
+            logger.info(f"Poll {attempt}: check_data keys={list(check_data.keys())}")
             task   = check_data.get("task", {})
             status = task.get("status")
+            logger.info(f"Poll {attempt}: status={status}")
 
             if status == "success":
                 result = task.get("result", {})
-                logger.info("Stem separation successful")
+                logger.info(f"Success! result keys={list(result.keys())}")
                 return jsonify({
                     "file_id":          file_id,
                     "vocals_url":       result.get("stem_track"),
                     "instrumental_url": result.get("back_track")
                 })
             elif status == "error":
-                logger.error("Lalal.ai processing error")
-                return jsonify({"error": "Stem separation failed"}), 500
+                logger.error(f"Lalal.ai processing error: {task}")
+                return jsonify({"error": "Stem separation failed", "detail": str(task)[:200]}), 500
 
             time.sleep(5)
 
@@ -162,7 +170,7 @@ def upload():
     except requests.exceptions.Timeout:
         return jsonify({"error": "Request timed out"}), 504
     except Exception as e:
-        logger.error(f"Upload error: {type(e).__name__}")  # log type only, not message (may contain data)
+        logger.error(f"Upload error: {type(e).__name__}: {str(e)[:200]}")
         return jsonify({"error": "Internal server error"}), 500
     finally:
         if os.path.exists(filepath):
