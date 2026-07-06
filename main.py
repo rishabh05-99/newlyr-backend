@@ -110,7 +110,7 @@ def upload():
             upload_response = requests.post(
                 "https://www.lalal.ai/api/upload/",
                 headers={"Authorization": f"license {LALAL_API_KEY}"},
-                files={"file": (safe_filename, f, "audio/mpeg")},
+                files={"file": (safe_filename, f, "audio/mpeg", {"Content-Disposition": f'attachment; filename="{safe_filename}"'})},
                 timeout=60
             )
 
