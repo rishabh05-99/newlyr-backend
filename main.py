@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 import assemblyai as aai
 from flask import Flask, request, jsonify, send_file
@@ -182,11 +183,28 @@ def upload():
             logger.info(f"Poll {attempt}: task_state={task_state} split_info={split_info is not None}")
 
             if split_info:
-                logger.info(f"Success! stem_track={split_info.get('stem_track')[:50] if split_info.get('stem_track') else None}")
+                vocals_url       = split_info.get("stem_track")
+                instrumental_url = split_info.get("back_track")
+                logger.info(f"Stems ready — downloading and caching on server...")
+
+                # Download and cache both files immediately so they don't expire
+                session_id = str(uuid.uuid4())
+                vocals_path = os.path.join(UPLOAD_FOLDER, f"session_{session_id}_vocals.mp3")
+                inst_path   = os.path.join(UPLOAD_FOLDER, f"session_{session_id}_inst.mp3")
+
+                for url, path, name in [(vocals_url, vocals_path, "vocals"), (instrumental_url, inst_path, "instrumental")]:
+                    r = requests.get(url, timeout=120)
+                    if r.status_code != 200:
+                        return jsonify({"error": f"Failed to cache {name}"}), 500
+                    with open(path, "wb") as f:
+                        f.write(r.content)
+                    logger.info(f"Cached {name}: {len(r.content)} bytes → {path}")
+
                 return jsonify({
                     "file_id":          file_id,
-                    "vocals_url":       split_info.get("stem_track"),
-                    "instrumental_url": split_info.get("back_track")
+                    "session_id":       session_id,
+                    "vocals_url":       vocals_url,       # kept for lyrics endpoint
+                    "instrumental_url": instrumental_url  # kept for reference
                 })
             elif task_state == "error":
                 logger.error(f"Task error: {task_info}")
@@ -328,13 +346,9 @@ def merge():
 
     vocals_url       = data.get("vocals_url", "").strip()
     instrumental_url = data.get("instrumental_url", "").strip()
+    session_id       = data.get("session_id", "").strip()
     muted_words      = data.get("muted_words", [])
     recordings       = data.get("recordings", [])
-
-    # Validate URLs — both must be from Lalal.ai
-    for url in [vocals_url, instrumental_url]:
-        if not url or not (url.startswith("https://") and "lalal.ai" in url):
-            return jsonify({"error": "Invalid audio source"}), 400
 
     # Validate muted_words structure
     if not isinstance(muted_words, list) or len(muted_words) > 100:
@@ -347,20 +361,39 @@ def merge():
     tmp_files = []
 
     try:
-        vocals_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_vocals.mp3")
-        inst_path   = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_inst.mp3")
-        tmp_files.extend([vocals_path, inst_path])
-
-        for url, path, name in [(vocals_url, vocals_path, "vocals"), (instrumental_url, inst_path, "instrumental")]:
-            logger.info(f"Downloading {name} from: {url[:80]}")
-            r = requests.get(url, timeout=120)
-            logger.info(f"Download {name}: status={r.status_code} size={len(r.content)}")
-            if r.status_code != 200:
-                return jsonify({"error": f"Could not download {name} — the session may have expired. Please upload the song again.", "detail": f"HTTP {r.status_code}"}), 400
-            with open(path, "wb") as f:
-                f.write(r.content)
-            if not os.path.exists(path) or os.path.getsize(path) == 0:
-                return jsonify({"error": f"{name} file is empty after download"}), 500
+        # Try cached session files first (prevents URL expiry issues)
+        if session_id and re.match(r'^[a-f0-9\-]{36}$', session_id):
+            vocals_path = os.path.join(UPLOAD_FOLDER, f"session_{session_id}_vocals.mp3")
+            inst_path   = os.path.join(UPLOAD_FOLDER, f"session_{session_id}_inst.mp3")
+            if os.path.exists(vocals_path) and os.path.exists(inst_path):
+                logger.info(f"Using cached session files for {session_id}")
+            else:
+                logger.info(f"Session cache miss — downloading from URLs")
+                if not vocals_url or not instrumental_url:
+                    return jsonify({"error": "Session expired and no URLs provided. Please upload the song again."}), 400
+                vocals_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_vocals.mp3")
+                inst_path   = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_inst.mp3")
+                tmp_files.extend([vocals_path, inst_path])
+                for url, path, name in [(vocals_url, vocals_path, "vocals"), (instrumental_url, inst_path, "instrumental")]:
+                    r = requests.get(url, timeout=120)
+                    if r.status_code != 200:
+                        return jsonify({"error": f"Could not download {name} — please upload the song again"}), 400
+                    with open(path, "wb") as f:
+                        f.write(r.content)
+        else:
+            # No session ID — fall back to URL download
+            if not vocals_url or not instrumental_url:
+                return jsonify({"error": "Missing audio sources"}), 400
+            vocals_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_vocals.mp3")
+            inst_path   = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_inst.mp3")
+            tmp_files.extend([vocals_path, inst_path])
+            for url, path, name in [(vocals_url, vocals_path, "vocals"), (instrumental_url, inst_path, "instrumental")]:
+                logger.info(f"Downloading {name} from URL")
+                r = requests.get(url, timeout=120)
+                if r.status_code != 200:
+                    return jsonify({"error": f"Could not download {name} — please upload the song again", "detail": f"HTTP {r.status_code}"}), 400
+                with open(path, "wb") as f:
+                    f.write(r.content)
 
         # Apply muting via ffmpeg volume filter
         if muted_words:
