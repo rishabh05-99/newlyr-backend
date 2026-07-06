@@ -242,12 +242,12 @@ def lyrics():
 
         try:
             config = aai.TranscriptionConfig(
-                speech_model=aai.SpeechModel.best,
+                speech_model=aai.SpeechModel.nano,
             )
             transcriber = aai.Transcriber(config=config)
             logger.info("Uploading vocals to AssemblyAI...")
             transcript = transcriber.transcribe(tmp_vocals_path)
-            logger.info(f"AssemblyAI status: {transcript.status}")
+            logger.info(f"AssemblyAI status: {transcript.status} error: {transcript.error}")
 
             if transcript.status == aai.TranscriptStatus.error:
                 logger.error(f"AssemblyAI error: {transcript.error}")
