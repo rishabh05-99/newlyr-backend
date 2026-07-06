@@ -19,12 +19,14 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ── CORS — only allow your domain ──
+# ── CORS — allow your domains ──
 CORS(app, origins=[
     "https://newlyr.com",
     "https://www.newlyr.com",
-    "https://bejewelled-creponne-59fcbe.netlify.app"
-])
+    "https://bejewelled-creponne-59fcbe.netlify.app",
+    "http://localhost:3000",
+    "http://localhost:5000"
+], supports_credentials=False)
 
 # ── RATE LIMITING — protects against bill-burning attacks ──
 limiter = Limiter(
@@ -138,43 +140,57 @@ def upload():
             logger.error(f"No file_id in response: {upload_data}")
             return jsonify({"error": "No file ID from Lalal.ai", "detail": str(upload_data)[:200]}), 500
 
-        process_response = requests.post(
-            "https://www.lalal.ai/api/process/",
+        # Use /api/split/ (correct endpoint — /api/process/ is deprecated)
+        split_response = requests.post(
+            "https://www.lalal.ai/api/split/",
             headers={"Authorization": f"license {LALAL_API_KEY}"},
-            json={"id": file_id, "stem": "vocals", "splitter": "phoenix"},
+            data={"params": f'[{{"id": "{file_id}", "stem": "vocals", "splitter": "phoenix"}}]'},
             timeout=30
         )
 
-        logger.info(f"Lalal.ai process status: {process_response.status_code} body: {process_response.text[:200]}")
+        logger.info(f"Lalal.ai split status: {split_response.status_code} body: {split_response.text[:300]}")
 
-        if process_response.status_code != 200:
-            return jsonify({"error": "Stem processing failed", "detail": process_response.text[:200]}), 500
+        if split_response.status_code != 200:
+            return jsonify({"error": "Stem split failed", "detail": split_response.text[:200]}), 500
 
-        # Poll for completion
+        split_data = split_response.json()
+        if split_data.get("status") != "success":
+            return jsonify({"error": "Split rejected", "detail": str(split_data)[:200]}), 500
+
+        # Poll /api/check/ for completion
         for attempt in range(60):
             check_response = requests.post(
                 "https://www.lalal.ai/api/check/",
                 headers={"Authorization": f"license {LALAL_API_KEY}"},
-                json={"id": file_id},
+                data={"id": file_id},
                 timeout=15
             )
             check_data = check_response.json()
-            logger.info(f"Poll {attempt}: check_data keys={list(check_data.keys())}")
-            task   = check_data.get("task", {})
-            status = task.get("status")
-            logger.info(f"Poll {attempt}: status={status}")
+            logger.info(f"Poll {attempt}: status={check_response.status_code} keys={list(check_data.keys())}")
 
-            if status == "success":
-                result = task.get("result", {})
-                logger.info(f"Success! result keys={list(result.keys())}")
+            if check_data.get("status") != "success":
+                logger.error(f"Check error: {check_data}")
+                return jsonify({"error": "Check failed", "detail": str(check_data)[:200]}), 500
+
+            result = check_data.get("result", {})
+            file_result = result.get(file_id, {})
+            logger.info(f"Poll {attempt}: file_result keys={list(file_result.keys())}")
+
+            split_info = file_result.get("split")
+            task_info  = file_result.get("task", {})
+            task_state = task_info.get("state") if task_info else None
+            logger.info(f"Poll {attempt}: task_state={task_state} split_info={split_info is not None}")
+
+            if split_info:
+                logger.info(f"Success! stem_track={split_info.get('stem_track')[:50] if split_info.get('stem_track') else None}")
                 return jsonify({
                     "file_id":          file_id,
-                    "vocals_url":       result.get("stem_track"),
-                    "instrumental_url": result.get("back_track")
+                    "vocals_url":       split_info.get("stem_track"),
+                    "instrumental_url": split_info.get("back_track")
                 })
-            elif status == "error":
-                logger.error(f"Lalal.ai processing error: {task}")
-                return jsonify({"error": "Stem separation failed", "detail": str(task)[:200]}), 500
+            elif task_state == "error":
+                logger.error(f"Task error: {task_info}")
+                return jsonify({"error": "Stem separation failed", "detail": str(task_info)[:200]}), 500
 
             time.sleep(5)
 
