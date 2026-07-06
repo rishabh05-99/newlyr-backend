@@ -351,11 +351,16 @@ def merge():
         inst_path   = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_inst.mp3")
         tmp_files.extend([vocals_path, inst_path])
 
-        for url, path in [(vocals_url, vocals_path), (instrumental_url, inst_path)]:
-            r = requests.get(url, timeout=60)
-            r.raise_for_status()
+        for url, path, name in [(vocals_url, vocals_path, "vocals"), (instrumental_url, inst_path, "instrumental")]:
+            logger.info(f"Downloading {name} from: {url[:80]}")
+            r = requests.get(url, timeout=120)
+            logger.info(f"Download {name}: status={r.status_code} size={len(r.content)}")
+            if r.status_code != 200:
+                return jsonify({"error": f"Could not download {name} — the session may have expired. Please upload the song again.", "detail": f"HTTP {r.status_code}"}), 400
             with open(path, "wb") as f:
                 f.write(r.content)
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                return jsonify({"error": f"{name} file is empty after download"}), 500
 
         # Apply muting via ffmpeg volume filter
         if muted_words:
