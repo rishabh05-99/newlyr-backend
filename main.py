@@ -226,8 +226,7 @@ def lyrics():
         return jsonify({"error": "Invalid audio source"}), 400
 
     try:
-        # Download vocals from Lalal.ai first — their CDN URLs may not be
-        # publicly accessible directly by AssemblyAI
+        # Download vocals from Lalal.ai first
         logger.info(f"Downloading vocals from: {vocals_url[:80]}")
         vocals_response = requests.get(vocals_url, timeout=60)
         if vocals_response.status_code != 200:
@@ -240,22 +239,73 @@ def lyrics():
             f.write(vocals_response.content)
         logger.info(f"Vocals downloaded: {len(vocals_response.content)} bytes")
 
+        headers = {"Authorization": ASSEMBLYAI_API_KEY}
+
         try:
-            config = aai.TranscriptionConfig(
-                speech_model=aai.SpeechModel.nano,
+            # Step 1: Upload file directly to AssemblyAI
+            with open(tmp_vocals_path, "rb") as f:
+                upload_resp = requests.post(
+                    "https://api.assemblyai.com/v2/upload",
+                    headers=headers,
+                    data=f,
+                    timeout=120
+                )
+            logger.info(f"AssemblyAI upload: {upload_resp.status_code}")
+            if upload_resp.status_code != 200:
+                logger.error(f"Upload failed: {upload_resp.text[:200]}")
+                return jsonify({"error": "AssemblyAI upload failed"}), 500
+
+            upload_url = upload_resp.json().get("upload_url")
+            logger.info(f"Upload URL received: {upload_url[:50] if upload_url else None}")
+
+            # Step 2: Request transcription with word-level timestamps
+            transcript_request = {
+                "audio_url": upload_url,
+                "word_boost": [],
+            }
+            logger.info(f"Sending transcription request: {transcript_request}")
+            transcript_resp = requests.post(
+                "https://api.assemblyai.com/v2/transcript",
+                headers={**headers, "Content-Type": "application/json"},
+                json=transcript_request,
+                timeout=30
             )
-            transcriber = aai.Transcriber(config=config)
-            logger.info("Uploading vocals to AssemblyAI...")
-            transcript = transcriber.transcribe(tmp_vocals_path)
-            logger.info(f"AssemblyAI status: {transcript.status} error: {transcript.error}")
+            logger.info(f"Transcript request: {transcript_resp.status_code} {transcript_resp.text[:300]}")
+            if transcript_resp.status_code != 200:
+                return jsonify({"error": "Transcription request failed", "detail": transcript_resp.text[:200]}), 500
 
-            if transcript.status == aai.TranscriptStatus.error:
-                logger.error(f"AssemblyAI error: {transcript.error}")
-                return jsonify({"error": "Lyrics transcription failed", "detail": str(transcript.error)}), 500
+            transcript_id = transcript_resp.json().get("id")
+            logger.info(f"Transcript ID: {transcript_id}")
 
-            words = [{"text": w.text, "start": w.start, "end": w.end} for w in transcript.words]
-            logger.info(f"Lyrics fetched: {len(words)} words")
-            return jsonify({"full_text": transcript.text, "words": words})
+            # Step 3: Poll for completion
+            for attempt in range(60):
+                poll_resp = requests.get(
+                    f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+                    headers=headers,
+                    timeout=15
+                )
+                poll_data = poll_resp.json()
+                status = poll_data.get("status")
+                logger.info(f"Poll {attempt}: status={status}")
+
+                if status == "completed":
+                    words = []
+                    for w in poll_data.get("words", []):
+                        words.append({
+                            "text":  w.get("text", ""),
+                            "start": w.get("start", 0),
+                            "end":   w.get("end", 0)
+                        })
+                    logger.info(f"Transcription complete: {len(words)} words")
+                    return jsonify({"full_text": poll_data.get("text", ""), "words": words})
+                elif status == "error":
+                    logger.error(f"Transcription error: {poll_data.get('error')}")
+                    return jsonify({"error": "Transcription failed", "detail": poll_data.get("error")}), 500
+
+                time.sleep(5)
+
+            return jsonify({"error": "Transcription timed out"}), 504
+
         finally:
             if os.path.exists(tmp_vocals_path):
                 os.remove(tmp_vocals_path)
