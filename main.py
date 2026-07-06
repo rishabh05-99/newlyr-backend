@@ -106,11 +106,24 @@ def upload():
     logger.info(f"Upload received: size={size_mb:.1f}MB")  # log size, NOT filename for privacy
 
     try:
+        # Build content-disposition exactly as Lalal.ai's official example requires
+        from urllib.parse import quote
+        try:
+            safe_filename.encode('ascii')
+            file_expr = f'filename="{safe_filename}"'
+        except UnicodeEncodeError:
+            quoted = quote(safe_filename)
+            file_expr = f"filename*=utf-8''{quoted}"
+        content_disposition = f'attachment; {file_expr}'
+
         with open(filepath, "rb") as f:
             upload_response = requests.post(
                 "https://www.lalal.ai/api/upload/",
-                headers={"Authorization": f"license {LALAL_API_KEY}"},
-                files={"file": (safe_filename, f, "audio/mpeg", {"Content-Disposition": f'attachment; filename="{safe_filename}"'})},
+                headers={
+                    "Authorization": f"license {LALAL_API_KEY}",
+                    "Content-Disposition": content_disposition,
+                },
+                data=f,
                 timeout=60
             )
 
