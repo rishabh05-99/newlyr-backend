@@ -18,6 +18,25 @@ import threading
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
+# ── INSTALL FFMPEG AT STARTUP IF NOT PRESENT ──
+def ensure_ffmpeg():
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=10)
+        if result.returncode == 0:
+            logger.info("ffmpeg is available")
+            return
+    except FileNotFoundError:
+        pass
+    logger.info("ffmpeg not found — installing via apt-get...")
+    try:
+        subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=60)
+        subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], capture_output=True, timeout=120)
+        logger.info("ffmpeg installed successfully")
+    except Exception as e:
+        logger.error(f"ffmpeg install failed: {e}")
+
+ensure_ffmpeg()
+
 app = Flask(__name__)
 
 CORS(app, origins=[
