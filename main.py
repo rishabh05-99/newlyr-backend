@@ -325,6 +325,11 @@ def merge():
             return jsonify({"error": "No session ID — please upload the song again"}), 400
 
         # Apply muting
+        logger.info(f"Merge received: {len(muted_words)} muted_words, {len(recordings)} recordings")
+        if muted_words:
+            logger.info(f"First muted word: {muted_words[0]}")
+        if recordings:
+            logger.info(f"First recording: start={recordings[0].get('start')}, end={recordings[0].get('end')}, has_audio={bool(recordings[0].get('audio_b64'))}")
         if muted_words:
             mute_filters = []
             for w in muted_words:
