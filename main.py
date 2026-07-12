@@ -55,12 +55,66 @@ limiter = Limiter(
 
 LALAL_API_KEY      = os.environ.get("LALAL_API_KEY")
 ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
+SUPABASE_URL       = os.environ.get("SUPABASE_URL", "https://qbubnyywsktcteetzlbl.supabase.co")
+SUPABASE_ANON_KEY  = os.environ.get("SUPABASE_ANON_KEY")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET")
+ADMIN_EMAILS       = ["rishabhsapra13@gmail.com"]
 
 aai.settings.api_key = ASSEMBLYAI_API_KEY
 
 UPLOAD_FOLDER = tempfile.gettempdir()
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg'}
 MAX_FILE_SIZE_MB = 50
+
+# ── SUPABASE HELPERS ──
+def supa_headers():
+    return {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+
+def get_user(email):
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/users?email=eq.{email}&select=*",
+        headers=supa_headers(), timeout=10
+    )
+    data = r.json()
+    return data[0] if data else None
+
+def create_user(email):
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/users",
+        headers=supa_headers(),
+        json={"email": email}, timeout=10
+    )
+    data = r.json()
+    return data[0] if isinstance(data, list) and data else None
+
+def get_active_subscription(email):
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/subscriptions?email=eq.{email}&paid_until=gt.{now}&select=*&order=paid_until.desc&limit=1",
+        headers=supa_headers(), timeout=10
+    )
+    data = r.json()
+    return data[0] if data else None
+
+def create_subscription(email, plan, days, payment_id):
+    from datetime import datetime, timedelta
+    paid_until = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/subscriptions",
+        headers=supa_headers(),
+        json={"email": email, "plan": plan, "paid_until": paid_until, "payment_id": payment_id},
+        timeout=10
+    )
+    data = r.json()
+    return data[0] if isinstance(data, list) and data else None
+
+# ── IN-MEMORY JOB STORE ──
+jobs = {}
 
 # ── IN-MEMORY JOB STORE ──
 # Stores job status while processing happens in background thread
@@ -407,6 +461,81 @@ def merge():
                     os.remove(path)
             except Exception:
                 pass
+
+
+# ────────────────────────────────────────────────
+# ENDPOINT — /check_access
+# Called when user enters email — checks if they have active subscription
+# ────────────────────────────────────────────────
+@app.route("/check_access", methods=["POST"])
+@limiter.limit("20 per minute")
+def check_access():
+    data = request.get_json()
+    email = data.get("email", "").strip().lower()
+    if not email or "@" not in email:
+        return jsonify({"error": "Invalid email"}), 400
+
+    # Admin bypass
+    if email in ADMIN_EMAILS:
+        return jsonify({"access": True, "isAdmin": True, "plan": "admin"})
+
+    # Check Supabase for active subscription
+    try:
+        sub = get_active_subscription(email)
+        if sub:
+            return jsonify({
+                "access":    True,
+                "plan":      sub.get("plan"),
+                "paidUntil": sub.get("paid_until")
+            })
+        else:
+            return jsonify({"access": False})
+    except Exception as e:
+        logger.error(f"check_access error: {e}")
+        return jsonify({"error": "Could not verify access"}), 500
+
+
+# ────────────────────────────────────────────────
+# ENDPOINT — /confirm_payment
+# Called after Razorpay payment succeeds on frontend
+# Stores user + subscription in Supabase
+# ────────────────────────────────────────────────
+@app.route("/confirm_payment", methods=["POST"])
+@limiter.limit("10 per minute")
+def confirm_payment():
+    data = request.get_json()
+    email      = data.get("email", "").strip().lower()
+    plan       = data.get("plan", "")
+    payment_id = data.get("payment_id", "")
+
+    if not email or not plan or not payment_id:
+        return jsonify({"error": "Missing required fields"}), 400
+
+    if plan not in ["15days", "monthly"]:
+        return jsonify({"error": "Invalid plan"}), 400
+
+    days = 15 if plan == "15days" else 30
+
+    try:
+        # Create user if doesn't exist
+        user = get_user(email)
+        if not user:
+            create_user(email)
+
+        # Create subscription
+        sub = create_subscription(email, plan, days, payment_id)
+        logger.info(f"Subscription created: {email} on {plan} plan")
+
+        from datetime import datetime, timedelta
+        paid_until = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return jsonify({
+            "success":   True,
+            "plan":      plan,
+            "paidUntil": paid_until
+        })
+    except Exception as e:
+        logger.error(f"confirm_payment error: {e}")
+        return jsonify({"error": "Could not confirm payment"}), 500
 
 
 # ────────────────────────────────────────────────
